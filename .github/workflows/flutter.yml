@@ -1,90 +1,99 @@
-name: Android CI
-
-permissions: write-all
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref }}
-  cancel-in-progress: true
+name: "Build"
 
 on:
-  push:
-    branches: ["main"]
   pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - ready_for_review
     branches:
-      - "master"
-      - "main"
-    paths-ignore:
-      - "**.md"
-      - "doc/**"
-      - ".git/"
-      - ".vscode/"
+      - dev
+      - test
+  push:
+    branches:
+      - dev
+      - test
 
-jobs:
-  analyze:
-    name: Analyze
-    if: github.event.pull_request.draft == false
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
+jobs:  
+  build:      
+    name: Build & Release 
+    runs-on: macos-latest 
+
     steps:
-      - name: ⬇️ Checkout repository
+        #1 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v3
-      - name: ⚙️ Setup Flutter
+
+        #2 Setup Java
+      - name: Set Up Java
+        uses: actions/setup-java@v3.12.0
+        with:
+          distribution: 'oracle'
+          java-version: '17'
+
+        #3 Setup Flutter
+      - name: Set Up Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: "stable"
-          cache: true
-      - name: ⚙️ Setup Melos
-        uses: bluefireteam/melos-action@v2
-      - name: ⚙️ Install dependencies for all packages
-        run: melos build:pub_get:all
-      - name: 📄 Move dummy pubspec.yaml to root
-        run: cp scripts/pubspec_template.yaml pubspec.yaml
-      - name: ⚠️ℹ️ Run Dart analysis for app package
-        uses: zgosalvez/github-actions-analyze-dart@v2.0.9
-        with:
-          working-directory: "${{github.workspace}}/app/"
-      - name: ⚠️ℹ️ Run Dart analysis for data package
-        uses: zgosalvez/github-actions-analyze-dart@v2.0.9
-        with:
-          working-directory: "${{github.workspace}}/design_system/"
-      - name: 📈 Check metrics
-        uses: dart-code-checker/dart-code-metrics-action@v3.0.0
-        with:
-          github_token: ${{ secrets.GH_TOKEN }}
-          pull_request_comment: true
-          check_unused_files: true
-          folders: "app, design_system"
-  build:
-    name: Build Android
-    if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: ⬇️ Checkout repository
-        uses: actions/checkout@v3
-      - name: ⚙️ Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          cache: true
-      - name: ⚙️ Setup Java
-        uses: actions/setup-java@v3
-        with:
-          distribution: "zulu"
-          java-version: "12.x"
-          cache: "gradle"
-        id: java
-      - name: ⚙️ Setup Melos
-        uses: bluefireteam/melos-action@v2
-      - name: ⚙️ Install dependencies for all packages
-        run: melos build:pub_get:all
-      - name: 🤖🔨 Build Android app
+          flutter-version: '3.22.2'
+          channel: 'stable'
+
+        #4 Install Dependencies
+      - name: Install Dependencies
+        run: flutter pub get
+        
+       #6 Building APK
+      - name: Build APK
+        run: flutter build apk --release
+
+        #7 Building App Bundle (aab)
+      - name: Build appBundle
+        run: flutter build appbundle
+
+        #8 Build IPA ( IOS Build )
+      - name: Build IPA
+        run: flutter build ipa --no-codesign
+
+      - name: Compress Archives and IPAs
         run: |
-          pushd app/
-          flutter build appbundle --debug --flavor dev -t lib/main_dev.dart
-          popd
+          cd build
+          tar -czf ios_build.tar.gz ios
+
+        #9 Upload Artifacts
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: Releases
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+            build/ios_build.tar.gz
+
+        #10 Extract Version
+      - name: Extract version from pubspec.yaml
+        id: extract_version
+        run: |
+          version=$(grep '^version: ' pubspec.yaml | cut -d ' ' -f 2 | tr -d '\r')
+          echo "VERSION=$version" >> $GITHUB_ENV
+
+        #11 Check if Tag Exists
+      - name: Check if Tag Exists
+        id: check_tag
+        run: |
+          if git rev-parse "v${{ env.VERSION }}" >/dev/null 2>&1; then
+            echo "TAG_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "TAG_EXISTS=false" >> $GITHUB_ENV
+          fi
+
+        #12 Modify Tag if it Exists
+      - name: Modify Tag
+        if: env.TAG_EXISTS == 'true'
+        id: modify_tag
+        run: |
+          new_version="${{ env.VERSION }}-build-${{ github.run_number }}"
+          echo "VERSION=$new_version" >> $GITHUB_ENV
+        
+        #13 Create Release
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "build/app/outputs/flutter-apk/app-release.apk,build/app/outputs/bundle/release/app-release.aab,build/ios_build.tar.gz"
+          tag: v${{ env.VERSION }}
+          token: ${{ secrets.GH_TOKEN }}
